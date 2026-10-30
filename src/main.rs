@@ -2,7 +2,7 @@
 //! Daily Planner: calendar to-do app with repeating tasks, subtasks, projects and daily notes.
 //! Data: $XDG_DATA_HOME/daily-planner/data.json (older files load fine).
 
-use chrono::{Datelike, Duration, Local, NaiveDate};
+use chrono::{Datelike, Duration, Local, NaiveDate, Weekday};
 use eframe::egui::{
     self,
     text::{LayoutJob, TextFormat},
@@ -80,7 +80,7 @@ const LIGHT: Pal = Pal {
     bold: c(177, 92, 0),
 };
 
-fn apply_theme(ctx: &egui::Context, p: &Pal, dark: bool) {
+fn apply_theme(ctx: &egui::Context, p: &Pal, dark: bool, scale: f32) {
     let mut v = if dark { Visuals::dark() } else { Visuals::light() };
     v.panel_fill = p.bg;
     v.window_fill = p.card;
@@ -121,16 +121,139 @@ fn apply_theme(ctx: &egui::Context, p: &Pal, dark: bool) {
     s.visuals = v;
     s.spacing.item_spacing = Vec2::new(8.0, 7.0);
     s.spacing.button_padding = Vec2::new(10.0, 5.0);
-    s.text_styles.insert(TextStyle::Heading, FontId::proportional(21.0));
-    s.text_styles.insert(TextStyle::Body, FontId::proportional(14.5));
-    s.text_styles.insert(TextStyle::Button, FontId::proportional(14.5));
-    s.text_styles.insert(TextStyle::Small, FontId::proportional(12.0));
-    s.text_styles.insert(TextStyle::Monospace, FontId::monospace(13.5));
+    let k = scale.clamp(0.8, 1.6);
+    s.text_styles.insert(TextStyle::Heading, FontId::proportional(21.0 * k));
+    s.text_styles.insert(TextStyle::Body, FontId::proportional(14.5 * k));
+    s.text_styles.insert(TextStyle::Button, FontId::proportional(14.5 * k));
+    s.text_styles.insert(TextStyle::Small, FontId::proportional(12.0 * k));
+    s.text_styles.insert(TextStyle::Monospace, FontId::monospace(13.5 * k));
     ctx.set_style(s);
 }
 
 fn cap(p: &Pal, s: impl Into<String>) -> RichText {
     RichText::new(s).size(12.0).color(p.muted)
+}
+
+// ---------------------------------------------------------------- helpers
+fn rgb(a: [u8; 3]) -> Color32 {
+    Color32::from_rgb(a[0], a[1], a[2])
+}
+
+fn contrast_fg(a: [u8; 3]) -> Color32 {
+    let l = 0.299 * a[0] as f32 + 0.587 * a[1] as f32 + 0.114 * a[2] as f32;
+    if l > 150.0 {
+        c(18, 19, 27)
+    } else {
+        c(245, 247, 255)
+    }
+}
+
+fn fit(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        let mut o: String = s.chars().take(max.saturating_sub(1)).collect();
+        o.push('\u{2026}');
+        o
+    }
+}
+
+/// Calendar text with optional outline (halo) and faux-bold (egui has no bold font, so the
+/// glyphs are redrawn a fraction of a pixel apart).
+fn legible_text(
+    p: &egui::Painter,
+    pos: Pos2,
+    text: &str,
+    font: FontId,
+    color: Color32,
+    halo: Option<Color32>,
+    bold: u8,
+) -> Rect {
+    if let Some(h) = halo {
+        for off in [
+            Vec2::new(1.0, 0.0),
+            Vec2::new(-1.0, 0.0),
+            Vec2::new(0.0, 1.0),
+            Vec2::new(0.0, -1.0),
+        ] {
+            p.text(pos + off, Align2::LEFT_TOP, text, font.clone(), h);
+        }
+    }
+    let r = p.text(pos, Align2::LEFT_TOP, text, font.clone(), color);
+    let extra: &[f32] = match bold {
+        0 => &[],
+        1 => &[0.6],
+        _ => &[0.6, 1.2],
+    };
+    for dx in extra {
+        p.text(pos + Vec2::new(*dx, 0.0), Align2::LEFT_TOP, text, font.clone(), color);
+    }
+    r
+}
+
+/// Built-in US holidays: (full name, short name for calendar cells).
+fn holiday(d: NaiveDate) -> Option<(&'static str, &'static str)> {
+    let (y, m, day) = (d.year(), d.month(), d.day());
+    match (m, day) {
+        (6, 19) => return Some(("Juneteenth", "Juneteenth")),
+        (11, 11) => return Some(("Veterans Day", "Veterans Day")),
+        (12, 25) => return Some(("Christmas", "Christmas")),
+        _ => {}
+    }
+    let nth = |mo: u32, wd: Weekday, n: u8| NaiveDate::from_weekday_of_month_opt(y, mo, wd, n) == Some(d);
+    if nth(1, Weekday::Mon, 3) {
+        Some(("Martin Luther King Jr. Day", "MLK Day"))
+    } else if nth(5, Weekday::Sun, 2) {
+        Some(("Mother's Day", "Mother's Day"))
+    } else if nth(6, Weekday::Sun, 3) {
+        Some(("Father's Day", "Father's Day"))
+    } else if nth(9, Weekday::Mon, 1) {
+        Some(("Labor Day", "Labor Day"))
+    } else if nth(11, Weekday::Thu, 4) {
+        Some(("Thanksgiving", "Thanksgiving"))
+    } else {
+        None
+    }
+}
+
+const SWATCHES: [[u8; 3]; 8] = [
+    [122, 162, 247], // blue
+    [125, 207, 255], // cyan
+    [115, 218, 202], // teal
+    [158, 206, 106], // green
+    [224, 175, 104], // yellow
+    [255, 158, 100], // orange
+    [247, 118, 142], // red
+    [187, 154, 247], // magenta
+];
+
+/// Row of quick color swatches + a custom picker. Returns true when the value changed.
+fn color_row(ui: &mut egui::Ui, value: &mut Option<[u8; 3]>, reset: &str) -> bool {
+    let mut changed = false;
+    ui.horizontal_wrapped(|ui| {
+        for sw in SWATCHES {
+            let (r, resp) = ui.allocate_exact_size(Vec2::splat(18.0), Sense::click());
+            ui.painter().rect_filled(r, 9.0, rgb(sw));
+            if *value == Some(sw) {
+                ui.painter()
+                    .rect_stroke(r.expand(2.5), 11.0, Stroke::new(1.5, ui.visuals().text_color()));
+            }
+            if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                *value = Some(sw);
+                changed = true;
+            }
+        }
+        let mut custom = value.unwrap_or([128, 128, 128]);
+        if ui.color_edit_button_srgb(&mut custom).changed() {
+            *value = Some(custom);
+            changed = true;
+        }
+        if value.is_some() && ui.small_button(reset).clicked() {
+            *value = None;
+            changed = true;
+        }
+    });
+    changed
 }
 
 // ---------------------------------------------------------------- data
@@ -145,16 +268,18 @@ enum Repeat {
     Weekly,
     Biweekly,
     Monthly,
+    Yearly,
 }
 
 impl Repeat {
-    const ALL: [Repeat; 6] = [
+    const ALL: [Repeat; 7] = [
         Repeat::Once,
         Repeat::Daily,
         Repeat::Weekdays,
         Repeat::Weekly,
         Repeat::Biweekly,
         Repeat::Monthly,
+        Repeat::Yearly,
     ];
     fn label(self) -> &'static str {
         match self {
@@ -164,6 +289,7 @@ impl Repeat {
             Repeat::Weekly => "Every week",
             Repeat::Biweekly => "Every 2 weeks",
             Repeat::Monthly => "Every month",
+            Repeat::Yearly => "Every year",
         }
     }
     fn tag(self) -> &'static str {
@@ -174,6 +300,7 @@ impl Repeat {
             Repeat::Weekly => "weekly",
             Repeat::Biweekly => "biweekly",
             Repeat::Monthly => "monthly",
+            Repeat::Yearly => "yearly",
         }
     }
 }
@@ -189,7 +316,7 @@ struct Task {
     id: String,
     title: String,
     #[serde(default)]
-    start: String, // "" = not linked to a day (project tasks only)
+    start: String, // "" = no date
     #[serde(default)]
     repeat: Repeat,
     #[serde(default)]
@@ -198,6 +325,10 @@ struct Task {
     subs: Vec<Sub>,
     #[serde(default)]
     from: String, // original day if this task was rolled over
+    #[serde(default)]
+    label: String, // label id, "" = none
+    #[serde(default)]
+    color: Option<[u8; 3]>, // custom color (wins over label and project)
     #[serde(skip)]
     sd: Option<NaiveDate>,
 }
@@ -208,6 +339,17 @@ struct Project {
     id: String,
     name: String,
     note: String,
+    color: Option<[u8; 3]>,
+    parent: String, // id of the main project; "" = top-level
+}
+
+/// A named color you can quick-assign to tasks (e.g. "Homework").
+#[derive(Serialize, Deserialize, Clone, Default)]
+#[serde(default)]
+struct Label {
+    id: String,
+    name: String,
+    color: [u8; 3],
 }
 
 /// A custom calendar look: an optional default image plus an optional image per month.
@@ -225,9 +367,22 @@ struct BgTheme {
 struct Data {
     tasks: Vec<Task>,
     projects: Vec<Project>,
+    labels: Vec<Label>,
+    labels_seeded: bool,
     done: BTreeMap<String, u8>,
     notes: BTreeMap<String, String>,
     theme: String,
+    accent: Option<[u8; 3]>,
+    cell_opacity: f32, // percent
+    cell_radius: f32,
+    preview_max: u8,
+    cal_font: f32,       // calendar cell text size, percent
+    ui_font: f32,        // interface text size, percent
+    text_bold: u8,       // 0 normal, 1 bold, 2 extra bold (calendar cells)
+    text_outline: bool,  // thin halo around calendar text
+    text_backing: f32,   // percent opacity of the panel behind task text
+    week_mon: bool,
+    show_holidays: bool,
     bg_themes: Vec<BgTheme>,
     bg_active: String,
     bg_strength: f32, // percent, kept low so text stays readable
@@ -239,9 +394,22 @@ impl Default for Data {
         Data {
             tasks: Vec::new(),
             projects: Vec::new(),
+            labels: Vec::new(),
+            labels_seeded: false,
             done: BTreeMap::new(),
             notes: BTreeMap::new(),
             theme: String::new(),
+            accent: None,
+            cell_opacity: 85.0,
+            cell_radius: 10.0,
+            preview_max: 4,
+            cal_font: 100.0,
+            ui_font: 100.0,
+            text_bold: 0,
+            text_outline: true,
+            text_backing: 40.0,
+            week_mon: false,
+            show_holidays: true,
             bg_themes: Vec::new(),
             bg_active: String::new(),
             bg_strength: 30.0,
@@ -278,6 +446,7 @@ fn occurs(t: &Task, d: NaiveDate) -> bool {
         Repeat::Weekly => d.weekday() == s.weekday(),
         Repeat::Biweekly => (d - s).num_days() % 14 == 0,
         Repeat::Monthly => d.day() == s.day(),
+        Repeat::Yearly => d.month() == s.month() && d.day() == s.day(),
     }
 }
 
@@ -611,13 +780,12 @@ const KEYS: &[(&str, &str)] = &[
     ("n", "Write the day's note"),
     ("m", "Toggle markdown preview"),
     ("t", "Jump to today"),
-    ("b", "Backgrounds (custom month images)"),
+    ("s", "Theme settings (colors, opacity, backgrounds)"),
     ("Left / Right", "Previous / next day"),
     ("Up / Down", "Previous / next week"),
     ("PgUp / PgDn", "Previous / next month"),
     ("c", "Calendar view"),
     ("l", "All notes list"),
-    ("1 - 9", "Open project 1 - 9"),
     ("Enter", "Add the task or subtask you're typing"),
     ("Esc", "Leave a text box"),
     ("? or F1", "Show / hide this help"),
@@ -649,7 +817,12 @@ struct App {
     new_title: String,
     new_repeat: Repeat,
     proj_title: String,
-    proj_link: bool,
+    edit_task: Option<String>,
+    edit_picker: bool,
+    edit_cal: (i32, u32),
+    labels_open: bool,
+    new_label: String,
+    new_label_color: [u8; 3],
     sub_add: Option<String>,
     sub_buf: String,
     sub_focus: bool,
@@ -664,7 +837,7 @@ struct App {
     undo: Option<(String, String)>,
     rolled: Vec<(String, String, String)>, // (task id, previous start, previous `from`)
     bg: Bg,
-    bg_open: bool,
+    settings_open: bool,
     pick_slot: Option<usize>,
     pick_path: String,
     pick_note: String,
@@ -692,7 +865,12 @@ impl App {
             new_title: String::new(),
             new_repeat: Repeat::Once,
             proj_title: String::new(),
-            proj_link: false,
+            edit_task: None,
+            edit_picker: false,
+            edit_cal: (today.year(), today.month()),
+            labels_open: false,
+            new_label: String::new(),
+            new_label_color: [122, 162, 247],
             sub_add: None,
             sub_buf: String::new(),
             sub_focus: false,
@@ -707,7 +885,7 @@ impl App {
             undo: None,
             rolled: Vec::new(),
             bg: Bg::default(),
-            bg_open: false,
+            settings_open: false,
             pick_slot: None,
             pick_path: String::new(),
             pick_note: String::new(),
@@ -715,18 +893,31 @@ impl App {
             dirty: false,
             last_edit: Instant::now(),
         };
-        apply_theme(&cc.egui_ctx, &app.pal(), app.dark);
+        apply_theme(&cc.egui_ctx, &app.pal(), app.dark, app.data.ui_font / 100.0);
         app.select(today);
         app.rollover();
+        if app.data.labels.is_empty() && !app.data.labels_seeded {
+            for (name, color) in [
+                ("Homework", [255, 158, 100]),
+                ("Work", [187, 154, 247]),
+                ("Personal", [158, 206, 106]),
+                ("Urgent", [247, 118, 142]),
+            ] {
+                app.data.labels.push(Label { id: new_id(), name: name.to_string(), color });
+            }
+            app.data.labels_seeded = true;
+            app.mark();
+        }
         app
     }
 
     fn pal(&self) -> Pal {
-        if self.dark {
-            DARK
-        } else {
-            LIGHT
+        let mut p = if self.dark { DARK } else { LIGHT };
+        if let Some(a) = self.data.accent {
+            p.accent = rgb(a);
+            p.sel_fg = contrast_fg(a);
         }
+        p
     }
 
     fn mark(&mut self) {
@@ -803,6 +994,7 @@ impl App {
     }
 
     // ----- tasks
+    /// New task for the selected day. Repeat, label, color etc. are set afterwards via Edit.
     fn add_task(&mut self) {
         let title = self.new_title.trim().to_string();
         if title.is_empty() {
@@ -812,38 +1004,131 @@ impl App {
             id: new_id(),
             title,
             start: key(self.sel),
-            repeat: self.new_repeat,
+            repeat: Repeat::Once,
             project: String::new(),
             subs: Vec::new(),
             from: String::new(),
+            label: String::new(),
+            color: None,
             sd: Some(self.sel),
         });
         self.new_title.clear();
         self.mark();
     }
 
+    /// New project task: no date until you give it one.
     fn add_project_task(&mut self, pid: &str) {
         let title = self.proj_title.trim().to_string();
         if title.is_empty() {
             return;
         }
-        let (start, sd) = if self.proj_link {
-            (key(self.sel), Some(self.sel))
-        } else {
-            (String::new(), None)
-        };
         self.data.tasks.push(Task {
             id: new_id(),
             title,
-            start,
+            start: String::new(),
             repeat: Repeat::Once,
             project: pid.to_string(),
             subs: Vec::new(),
             from: String::new(),
-            sd,
+            label: String::new(),
+            color: None,
+            sd: None,
         });
         self.proj_title.clear();
         self.mark();
+    }
+
+    /// Give a task a date (or remove it). Checkmarks follow one-off tasks to their new day.
+    fn set_task_date(&mut self, tid: &str, nd: Option<NaiveDate>) {
+        let Some(i) = self.data.tasks.iter().position(|t| t.id == tid) else {
+            return;
+        };
+        let (old_s, rep, ids) = {
+            let t = &self.data.tasks[i];
+            let mut ids = vec![t.id.clone()];
+            ids.extend(t.subs.iter().map(|s| s.id.clone()));
+            (t.sd.map(key).unwrap_or_else(|| "-".to_string()), t.repeat, ids)
+        };
+        let new_s = nd.map(key).unwrap_or_else(|| "-".to_string());
+        if nd.is_none() && rep != Repeat::Once {
+            self.purge_done(tid);
+        } else if rep == Repeat::Once {
+            for id in &ids {
+                self.move_done(id, &old_s, &new_s);
+            }
+        }
+        let t = &mut self.data.tasks[i];
+        t.sd = nd;
+        t.start = nd.map(key).unwrap_or_default();
+        if nd.is_none() {
+            t.repeat = Repeat::Once;
+        }
+        self.mark();
+    }
+
+    fn task_color(&self, t: &Task) -> Option<Color32> {
+        if let Some(a) = t.color {
+            return Some(rgb(a));
+        }
+        if !t.label.is_empty() {
+            if let Some(l) = self.data.labels.iter().find(|l| l.id == t.label) {
+                return Some(rgb(l.color));
+            }
+        }
+        if !t.project.is_empty() {
+            return self.proj_color(&t.project).map(rgb);
+        }
+        None
+    }
+
+    /// A project's color, falling back to its main project's color for subprojects.
+    fn proj_color(&self, id: &str) -> Option<[u8; 3]> {
+        let pr = self.data.projects.iter().find(|x| x.id == id)?;
+        if pr.color.is_some() {
+            return pr.color;
+        }
+        if pr.parent.is_empty() {
+            return None;
+        }
+        self.data
+            .projects
+            .iter()
+            .find(|x| x.id == pr.parent)
+            .and_then(|x| x.color)
+    }
+
+    fn new_subproject(&mut self, parent: &str) {
+        let id = new_id();
+        self.data.projects.push(Project {
+            id: id.clone(),
+            name: String::new(),
+            note: String::new(),
+            color: None,
+            parent: parent.to_string(),
+        });
+        self.view = View::Project(id);
+        self.focus_name = true;
+        self.mark();
+    }
+
+    fn nav_project_row(
+        &mut self,
+        ui: &mut egui::Ui,
+        id: &str,
+        name: &str,
+        color: Option<[u8; 3]>,
+        here: bool,
+    ) {
+        ui.horizontal(|ui| {
+            let (r, _) = ui.allocate_exact_size(Vec2::new(8.0, 8.0), Sense::hover());
+            if let Some(a) = color {
+                ui.painter().circle_filled(r.center(), 4.0, rgb(a));
+            }
+            let shown = if name.trim().is_empty() { "Untitled" } else { name };
+            if ui.selectable_label(here, shown).clicked() {
+                self.view = View::Project(id.to_string());
+            }
+        });
     }
 
     /// Unfinished one-off tasks from earlier days. Repeating tasks are skipped: they recur anyway.
@@ -942,16 +1227,30 @@ impl App {
         let Some(t) = self.data.tasks.iter().find(|t| t.id == tid).cloned() else {
             return;
         };
+        let k = (self.data.ui_font / 100.0).clamp(0.8, 1.6);
         let done = self.data.done.contains_key(&dk(&t.id, suffix));
-        let proj_name = if !in_project && !t.project.is_empty() {
-            self.data
-                .projects
-                .iter()
-                .find(|x| x.id == t.project)
-                .map(|x| x.name.clone())
+        let eff = self.task_color(&t);
+        let label = self
+            .data
+            .labels
+            .iter()
+            .find(|l| !t.label.is_empty() && l.id == t.label)
+            .map(|l| (l.name.clone(), rgb(l.color)));
+        let proj = if !in_project && !t.project.is_empty() {
+            self.data.projects.iter().find(|x| x.id == t.project).map(|x| {
+                let nm = if x.name.trim().is_empty() {
+                    "Untitled".to_string()
+                } else {
+                    x.name.clone()
+                };
+                (nm, self.proj_color(&x.id).map(rgb).unwrap_or(p.magenta))
+            })
         } else {
             None
         };
+        let from_lbl = NaiveDate::parse_from_str(&t.from, "%Y-%m-%d")
+            .ok()
+            .map(|d| format!("from {}", d.format("%b %-d")));
         let subs_done: Vec<bool> = t
             .subs
             .iter()
@@ -966,18 +1265,30 @@ impl App {
         let mut open_sub = false;
         let mut add_sub = false;
         let mut cancel_sub = false;
+        let mut edit = false;
         let mut jump: Option<NaiveDate> = None;
-        let mut link = 0u8;
 
         ui.horizontal(|ui| {
+            let (bar, _) = ui.allocate_exact_size(Vec2::new(4.0, 18.0), Sense::hover());
+            if let Some(cl) = eff {
+                ui.painter().rect_filled(bar, 2.0, cl);
+            }
+            // keep the title clear of the buttons on the right
+            let reserve = (if in_project && t.sd.is_some() { 215.0 } else { 150.0 }) * k;
+            let max_chars = (((ui.available_width() - reserve) / (7.2 * k)).floor() as usize).max(6);
+            let shown = fit(&t.title, max_chars);
             let mut checked = done;
             let title = if done {
-                RichText::new(&t.title).strikethrough().color(p.muted)
+                RichText::new(&shown).strikethrough().color(p.muted)
             } else {
-                RichText::new(&t.title)
+                RichText::new(&shown)
             };
-            if ui.checkbox(&mut checked, title).changed() {
+            let r = ui.checkbox(&mut checked, title);
+            if r.changed() {
                 toggle = Some(checked);
+            }
+            if shown != t.title {
+                r.on_hover_text(t.title.clone());
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if ui.small_button("×").on_hover_text("Delete task").clicked() {
@@ -986,31 +1297,43 @@ impl App {
                 if ui.small_button("+").on_hover_text("Add subtask").clicked() {
                     open_sub = true;
                 }
+                if ui.small_button("Edit").on_hover_text("Date, repeat, label, color").clicked() {
+                    edit = true;
+                }
                 if in_project {
                     if let Some(d) = t.sd {
-                        if ui.small_button("unlink").clicked() {
-                            link = 2;
-                        }
-                        if ui.small_button(d.format("%b %-d").to_string()).clicked() {
+                        if ui
+                            .small_button(d.format("%b %-d").to_string())
+                            .on_hover_text("Go to this day")
+                            .clicked()
+                        {
                             jump = Some(d);
                         }
-                    } else if ui.small_button("link day").clicked() {
-                        link = 1;
                     }
-                } else {
-                    if t.repeat != Repeat::Once {
-                        ui.label(RichText::new(t.repeat.tag()).size(11.5).color(p.muted));
-                    }
-                    if let Some(n) = &proj_name {
-                        ui.label(RichText::new(n).size(11.5).color(p.magenta));
-                    }
-                    if let Ok(d) = NaiveDate::parse_from_str(&t.from, "%Y-%m-%d") {
-                        ui.label(
-                            RichText::new(format!("from {}", d.format("%b %-d")))
-                                .size(11.5)
-                                .color(p.orange),
-                        );
-                    }
+                }
+            });
+        });
+
+        // chips on their own line, so they never collide with the title
+        let has_chips = t.repeat != Repeat::Once
+            || proj.is_some()
+            || label.is_some()
+            || from_lbl.is_some()
+            || !t.subs.is_empty();
+        if has_chips {
+            ui.horizontal_wrapped(|ui| {
+                ui.add_space(30.0);
+                if t.repeat != Repeat::Once {
+                    ui.label(RichText::new(t.repeat.tag()).size(11.5).color(p.muted));
+                }
+                if let Some((n, cl)) = &proj {
+                    ui.label(RichText::new(n).size(11.5).color(*cl));
+                }
+                if let Some((n, cl)) = &label {
+                    ui.label(RichText::new(n).size(11.5).color(*cl));
+                }
+                if let Some(f) = &from_lbl {
+                    ui.label(RichText::new(f).size(11.5).color(p.orange));
                 }
                 if !t.subs.is_empty() {
                     ui.label(
@@ -1020,16 +1343,19 @@ impl App {
                     );
                 }
             });
-        });
+        }
 
         for (i, s) in t.subs.iter().enumerate() {
             ui.horizontal(|ui| {
-                ui.add_space(24.0);
+                ui.add_space(28.0);
+                let max_chars =
+                    (((ui.available_width() - 60.0 * k) / (6.8 * k)).floor() as usize).max(6);
+                let shown = fit(&s.title, max_chars);
                 let mut checked = subs_done[i];
                 let title = if checked {
-                    RichText::new(&s.title).size(13.5).strikethrough().color(p.muted)
+                    RichText::new(&shown).size(13.5).strikethrough().color(p.muted)
                 } else {
-                    RichText::new(&s.title).size(13.5)
+                    RichText::new(&shown).size(13.5)
                 };
                 if ui.checkbox(&mut checked, title).changed() {
                     toggle_sub = Some((s.id.clone(), checked));
@@ -1044,7 +1370,7 @@ impl App {
 
         if self.sub_add.as_deref() == Some(tid) {
             ui.horizontal(|ui| {
-                ui.add_space(24.0);
+                ui.add_space(28.0);
                 let r = ui.add(
                     egui::TextEdit::singleline(&mut self.sub_buf)
                         .hint_text("Subtask…")
@@ -1066,20 +1392,20 @@ impl App {
 
         // ----- apply
         if let Some(v) = toggle {
-            let k = dk(&t.id, suffix);
+            let kk = dk(&t.id, suffix);
             if v {
-                self.data.done.insert(k, 1);
+                self.data.done.insert(kk, 1);
             } else {
-                self.data.done.remove(&k);
+                self.data.done.remove(&kk);
             }
             self.mark();
         }
         if let Some((sid, v)) = toggle_sub {
-            let k = dk(&sid, suffix);
+            let kk = dk(&sid, suffix);
             if v {
-                self.data.done.insert(k, 1);
+                self.data.done.insert(kk, 1);
             } else {
-                self.data.done.remove(&k);
+                self.data.done.remove(&kk);
             }
             self.mark();
         }
@@ -1110,26 +1436,16 @@ impl App {
                 x.subs.retain(|s| s.id != sid);
             }
             let prefix = format!("{}|", sid);
-            self.data.done.retain(|k, _| !k.starts_with(&prefix));
+            self.data.done.retain(|kk, _| !kk.starts_with(&prefix));
             self.mark();
         }
         if let Some(d) = jump {
             self.select(d);
             self.view = View::Calendar;
         }
-        if link != 0 {
-            self.purge_done(tid);
-            let sel = self.sel;
-            if let Some(x) = self.data.tasks.iter_mut().find(|x| x.id == tid) {
-                if link == 1 {
-                    x.start = key(sel);
-                    x.sd = Some(sel);
-                } else {
-                    x.start.clear();
-                    x.sd = None;
-                }
-            }
-            self.mark();
+        if edit {
+            self.edit_task = Some(t.id.clone());
+            self.edit_picker = false;
         }
         if del {
             if t.repeat != Repeat::Once {
@@ -1543,8 +1859,8 @@ impl App {
                 self.note_preview = !self.note_preview;
             }
         }
-        if take_key(ctx, Key::B, "b") {
-            self.bg_open = !self.bg_open;
+        if take_key(ctx, Key::S, "s") {
+            self.settings_open = !self.settings_open;
         }
         if take_key(ctx, Key::T, "t") {
             self.select(self.today);
@@ -1555,24 +1871,6 @@ impl App {
         if take_key(ctx, Key::L, "l") {
             self.view = View::Notes;
         }
-        let nums = [
-            (Key::Num1, "1"),
-            (Key::Num2, "2"),
-            (Key::Num3, "3"),
-            (Key::Num4, "4"),
-            (Key::Num5, "5"),
-            (Key::Num6, "6"),
-            (Key::Num7, "7"),
-            (Key::Num8, "8"),
-            (Key::Num9, "9"),
-        ];
-        for (n, (k, s)) in nums.iter().enumerate() {
-            if take_key(ctx, *k, s) {
-                if let Some(pr) = self.data.projects.get(n) {
-                    self.view = View::Project(pr.id.clone());
-                }
-            }
-        }
     }
 
     // ---------- left navigation
@@ -1581,6 +1879,7 @@ impl App {
         ui.label(RichText::new("Daily Planner").size(16.0).color(p.accent));
         ui.add_space(10.0);
         let mut new_project = false;
+        let mut open_labels = false;
         ui.with_layout(Layout::top_down_justified(Align::Min), |ui| {
             if ui.selectable_label(self.view == View::Calendar, "Calendar").clicked() {
                 self.view = View::Calendar;
@@ -1597,31 +1896,65 @@ impl App {
                     }
                 });
             });
-            let list: Vec<(String, String)> = self
+            let all_ids: Vec<String> = self.data.projects.iter().map(|x| x.id.clone()).collect();
+            let tops: Vec<(String, String, Option<[u8; 3]>)> = self
                 .data
                 .projects
                 .iter()
-                .map(|x| (x.id.clone(), x.name.clone()))
+                .filter(|x| x.parent.is_empty() || !all_ids.contains(&x.parent))
+                .map(|x| (x.id.clone(), x.name.clone(), x.color))
                 .collect();
-            for (i, (id, name)) in list.iter().enumerate() {
-                let shown = if name.trim().is_empty() { "Untitled" } else { name.as_str() };
-                let label = if i < 9 {
-                    format!("{}  {}", i + 1, shown)
-                } else {
-                    shown.to_string()
+            for (id, name, color) in &tops {
+                // viewing one of its subprojects keeps the main project highlighted
+                let here = match &self.view {
+                    View::Project(v) => {
+                        v == id
+                            || self
+                                .data
+                                .projects
+                                .iter()
+                                .any(|x| &x.id == v && &x.parent == id)
+                    }
+                    _ => false,
                 };
-                let here = self.view == View::Project(id.clone());
-                if ui.selectable_label(here, label).clicked() {
-                    self.view = View::Project(id.clone());
-                }
+                self.nav_project_row(ui, id, name, *color, here);
+            }
+            ui.add_space(12.0);
+            ui.horizontal(|ui| {
+                ui.label(cap(&p, "LABELS"));
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if ui.small_button("+").on_hover_text("Manage labels").clicked() {
+                        open_labels = true;
+                    }
+                });
+            });
+            let labels: Vec<(String, [u8; 3])> = self
+                .data
+                .labels
+                .iter()
+                .map(|l| (l.name.clone(), l.color))
+                .collect();
+            for (name, color) in &labels {
+                ui.horizontal(|ui| {
+                    let (r, _) = ui.allocate_exact_size(Vec2::new(8.0, 8.0), Sense::hover());
+                    ui.painter().circle_filled(r.center(), 4.0, rgb(*color));
+                    if ui.selectable_label(false, name.as_str()).clicked() {
+                        open_labels = true;
+                    }
+                });
             }
         });
+        if open_labels {
+            self.labels_open = true;
+        }
         if new_project {
             let id = new_id();
             self.data.projects.push(Project {
                 id: id.clone(),
                 name: String::new(),
                 note: String::new(),
+                color: None,
+                parent: String::new(),
             });
             self.view = View::Project(id);
             self.focus_name = true;
@@ -1631,14 +1964,8 @@ impl App {
             if ui.button("Shortcuts (?)").clicked() {
                 self.show_help = true;
             }
-            if ui.button("Backgrounds").clicked() {
-                self.bg_open = !self.bg_open;
-            }
-            if ui.button(if self.dark { "Light theme" } else { "Dark theme" }).clicked() {
-                self.dark = !self.dark;
-                self.data.theme = if self.dark { "dark" } else { "light" }.to_string();
-                apply_theme(ui.ctx(), &self.pal(), self.dark);
-                self.mark();
+            if ui.button("Theme settings").clicked() {
+                self.settings_open = !self.settings_open;
             }
         });
     }
@@ -1646,7 +1973,7 @@ impl App {
     // ---------- calendar
     fn calendar(&mut self, ui: &mut egui::Ui) {
         let p = self.pal();
-        let has_bg = self.bg_current().is_some();
+        let mut header_backing = None;
         if let Some((tex, size)) = self.bg_current() {
             // Cover-fit the image behind the whole calendar area, kept faint.
             let full = ui.max_rect().expand(18.0);
@@ -1661,20 +1988,15 @@ impl App {
             let a = (self.data.bg_strength.clamp(5.0, 50.0) / 100.0 * 255.0) as u8;
             let bgp = ui.painter().with_clip_rect(full);
             bgp.image(tex, full, uv, Color32::from_white_alpha(a));
-            // soft backing behind the month title and weekday row
-            let m = ui.max_rect();
-            bgp.rect_filled(
-                Rect::from_min_size(m.min, Vec2::new(m.width(), 66.0)).expand(6.0),
-                10.0,
-                Color32::from_rgba_unmultiplied(p.bg.r(), p.bg.g(), p.bg.b(), 190),
-            );
+            // soft backing behind the month title and weekday row; sized once they're laid out
+            let idx = bgp.add(egui::Shape::Noop);
+            header_backing = Some((bgp, idx, ui.max_rect()));
         }
+        let alpha = (self.data.cell_opacity.clamp(40.0, 100.0) / 100.0 * 255.0) as u8;
         let tr = |c: Color32, a: u8| Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), a);
-        let (card_c, hover_c) = if has_bg {
-            (tr(p.card, 214), tr(p.hover, 226))
-        } else {
-            (p.card, p.hover)
-        };
+        let (card_c, hover_c) = (tr(p.card, alpha), tr(p.hover, alpha.saturating_add(24)));
+        let rad = self.data.cell_radius.clamp(0.0, 16.0);
+
         let first = NaiveDate::from_ymd_opt(self.year, self.month, 1).unwrap();
         ui.horizontal(|ui| {
             ui.heading(first.format("%B %Y").to_string());
@@ -1699,7 +2021,13 @@ impl App {
         let (rect, _) = ui.allocate_exact_size(Vec2::new(avail.x, hh + ch * 6.0), Sense::hover());
         let painter = ui.painter().clone();
 
-        for (i, n) in ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].iter().enumerate() {
+        let mon = self.data.week_mon;
+        let names = if mon {
+            ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+        } else {
+            ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
+        };
+        for (i, n) in names.iter().enumerate() {
             painter.text(
                 Pos2::new(rect.left() + cw * (i as f32 + 0.5), rect.top() + hh / 2.0),
                 Align2::CENTER_CENTER,
@@ -1709,7 +2037,29 @@ impl App {
             );
         }
 
-        let start = first - Duration::days(first.weekday().num_days_from_sunday() as i64);
+        if let Some((bgp, idx, m)) = header_backing {
+            bgp.set(
+                idx,
+                egui::Shape::rect_filled(
+                    Rect::from_min_max(
+                        Pos2::new(m.left() - 6.0, m.top() - 6.0),
+                        Pos2::new(m.right() + 6.0, rect.top() + hh + 2.0),
+                    ),
+                    10.0,
+                    Color32::from_rgba_unmultiplied(p.bg.r(), p.bg.g(), p.bg.b(), 190),
+                ),
+            );
+        }
+        let lead = if mon {
+            first.weekday().num_days_from_monday()
+        } else {
+            first.weekday().num_days_from_sunday()
+        };
+        let start = first - Duration::days(lead as i64);
+        let fs = (self.data.cal_font / 100.0).clamp(0.8, 2.0);
+        let bold = self.data.text_bold.min(2);
+        let backing = (self.data.text_backing.clamp(0.0, 100.0) / 100.0 * 255.0) as u8;
+        let (line_h, top_pad, bottom_pad) = (13.0 * fs, 12.0 + 13.5 * fs, 9.0);
         let mut clicked = None;
         for i in 0..42i64 {
             let d = start + Duration::days(i);
@@ -1737,17 +2087,24 @@ impl App {
             } else {
                 p.fg
             };
-            painter.rect_filled(cell, 10.0, fill);
+            painter.rect_filled(cell, rad, fill);
             if d == self.today && !selected {
-                painter.rect_stroke(cell, 10.0, Stroke::new(1.5, p.accent));
+                painter.rect_stroke(cell, rad, Stroke::new(1.5, p.accent));
             }
             let cp = painter.with_clip_rect(cell);
-            cp.text(
+            let halo = if self.data.text_outline && !selected {
+                Some(tr(p.bg, 215))
+            } else {
+                None
+            };
+            legible_text(
+                &cp,
                 Pos2::new(cell.left() + 8.0, cell.top() + 6.0),
-                Align2::LEFT_TOP,
-                d.day().to_string(),
-                FontId::proportional(13.5),
+                &d.day().to_string(),
+                FontId::proportional(13.5 * fs),
                 fg,
+                halo,
+                bold,
             );
             if self.data.notes.contains_key(&key(d)) {
                 painter.circle_filled(
@@ -1756,51 +2113,96 @@ impl App {
                     if selected { p.sel_fg } else { p.magenta },
                 );
             }
+
+            let font = FontId::proportional(10.5 * fs);
+            let max_chars = (((cell.width() - 20.0) / (5.4 * fs)).floor() as usize).max(4);
+            let total_rows = (((cell.height() - top_pad - bottom_pad) / line_h).floor() as i64)
+                .clamp(0, 8) as usize;
+            let hol = if self.data.show_holidays && total_rows >= 1 {
+                holiday(d)
+            } else {
+                None
+            };
+            let used = hol.is_some() as usize;
             let tasks = self.data.tasks_for(d);
-            if !tasks.is_empty() {
-                let mut items: Vec<(&Task, bool)> = tasks
-                    .iter()
-                    .map(|t| (*t, self.data.is_done(&t.id, d)))
-                    .collect();
-                items.sort_by_key(|x| x.1); // unfinished first
-                let done = items.iter().filter(|x| x.1).count();
-                let (line_h, top_pad, bottom_pad) = (13.0, 25.0, 9.0);
-                let rows = (((cell.height() - top_pad - bottom_pad) / line_h).floor() as i64)
-                    .clamp(0, 6) as usize;
-                let shown = if items.len() <= rows {
-                    items.len()
-                } else {
-                    rows.saturating_sub(1)
-                };
-                let font = FontId::proportional(10.5);
-                let max_chars = (((cell.width() - 16.0) / 5.4).floor() as usize).max(4);
-                for (k, (t, is_done)) in items.iter().take(shown).enumerate() {
-                    let mut text: String = t.title.chars().take(max_chars).collect();
-                    if t.title.chars().count() > max_chars {
-                        text.pop();
-                        text.push('\u{2026}');
-                    }
-                    let col = if *is_done { fg.gamma_multiply(0.55) } else { fg };
-                    let pos = Pos2::new(cell.left() + 8.0, cell.top() + top_pad + k as f32 * line_h);
-                    let r = cp.text(pos, Align2::LEFT_TOP, text, font.clone(), col);
-                    if *is_done {
-                        let y = r.center().y;
-                        cp.line_segment(
-                            [Pos2::new(r.left(), y), Pos2::new(r.right(), y)],
-                            Stroke::new(1.0, col),
-                        );
-                    }
-                }
-                if items.len() > shown && rows > 0 {
-                    let more = items.len() - shown;
-                    cp.text(
-                        Pos2::new(cell.left() + 8.0, cell.top() + top_pad + shown as f32 * line_h),
-                        Align2::LEFT_TOP,
-                        format!("+{} more", more),
-                        font,
-                        if selected { p.sel_fg } else { p.accent },
+            let mut items: Vec<(&Task, bool)> = tasks
+                .iter()
+                .map(|t| (*t, self.data.is_done(&t.id, d)))
+                .collect();
+            items.sort_by_key(|x| x.1); // unfinished first
+            let avail_rows = total_rows
+                .saturating_sub(used)
+                .min(self.data.preview_max as usize);
+            let shown = if items.len() <= avail_rows {
+                items.len()
+            } else {
+                avail_rows.saturating_sub(1)
+            };
+            let more = items.len() > shown && avail_rows > 0;
+            let n_lines = used + shown + more as usize;
+            let y0 = cell.top() + top_pad;
+            if n_lines > 0 && !selected && backing > 0 {
+                // soft panel behind the text so it stays readable over images
+                let plate = Rect::from_min_size(
+                    Pos2::new(cell.left() + 4.0, y0 - 2.0),
+                    Vec2::new(cell.width() - 8.0, n_lines as f32 * line_h + 3.0),
+                );
+                cp.rect_filled(plate, 5.0, tr(p.bg, backing));
+            }
+            let mut y = y0;
+            if let Some((_, short)) = hol {
+                legible_text(
+                    &cp,
+                    Pos2::new(cell.left() + 8.0, y),
+                    &fit(short, max_chars),
+                    font.clone(),
+                    if selected { p.sel_fg } else { p.orange },
+                    halo,
+                    bold,
+                );
+                y += line_h;
+            }
+            for (k, (t, is_done)) in items.iter().take(shown).enumerate() {
+                let ty = y + k as f32 * line_h;
+                let text = fit(&t.title, max_chars.saturating_sub(2).max(3));
+                let tcol = if *is_done { fg.gamma_multiply(0.72) } else { fg };
+                if let Some(dot) = self.task_color(t) {
+                    cp.circle_filled(
+                        Pos2::new(cell.left() + 11.0, ty + 6.5 * fs),
+                        2.5 * fs.min(1.4),
+                        if *is_done { dot.gamma_multiply(0.6) } else { dot },
                     );
                 }
+                let rr = legible_text(
+                    &cp,
+                    Pos2::new(cell.left() + 8.0 + 9.0 * fs.min(1.5), ty),
+                    &text,
+                    font.clone(),
+                    tcol,
+                    halo,
+                    bold,
+                );
+                if *is_done {
+                    let yy = rr.center().y;
+                    cp.line_segment(
+                        [Pos2::new(rr.left(), yy), Pos2::new(rr.right(), yy)],
+                        Stroke::new(1.2, tcol),
+                    );
+                }
+            }
+            if more {
+                legible_text(
+                    &cp,
+                    Pos2::new(cell.left() + 8.0, y + shown as f32 * line_h),
+                    &format!("+{} more", items.len() - shown),
+                    font,
+                    if selected { p.sel_fg } else { p.accent },
+                    halo,
+                    bold,
+                );
+            }
+            if !items.is_empty() {
+                let done = items.iter().filter(|x| x.1).count();
                 let bw = cell.width() - 16.0;
                 let bar = Rect::from_min_size(
                     Pos2::new(cell.left() + 8.0, cell.bottom() - 6.0),
@@ -1889,20 +2291,68 @@ impl App {
         }
     }
 
-    // ---------- project page
+    // ---------- project page (a subproject shows only its own tasks and note)
     fn project_view(&mut self, ui: &mut egui::Ui, pid: &str) {
         let p = self.pal();
         let Some(pi) = self.data.projects.iter().position(|x| x.id == pid) else {
             self.view = View::Calendar;
             return;
         };
+        let parent_id = self.data.projects[pi].parent.clone();
+        let is_sub =
+            !parent_id.is_empty() && self.data.projects.iter().any(|x| x.id == parent_id);
+        let n_children = self.data.projects.iter().filter(|x| x.parent == pid).count();
+
+        // add-task bar lives at the bottom
+        egui::TopBottomPanel::bottom("proj-add")
+            .frame(egui::Frame::none().inner_margin(egui::Margin::symmetric(0.0, 8.0)))
+            .show_separator_line(false)
+            .show_inside(ui, |ui| {
+                let resp = ui.add(
+                    egui::TextEdit::singleline(&mut self.proj_title)
+                        .hint_text("Add a task to this project, then press Enter")
+                        .desired_width(f32::INFINITY),
+                );
+                if std::mem::take(&mut self.focus_ptask) {
+                    resp.request_focus();
+                }
+                self.typing |= resp.has_focus();
+                if resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
+                    self.add_project_task(pid);
+                    resp.request_focus();
+                }
+            });
+
+        if is_sub {
+            let pname = self
+                .data
+                .projects
+                .iter()
+                .find(|x| x.id == parent_id)
+                .map(|x| {
+                    if x.name.trim().is_empty() {
+                        "Untitled".to_string()
+                    } else {
+                        x.name.clone()
+                    }
+                })
+                .unwrap_or_default();
+            if ui
+                .small_button(format!("< {}", pname))
+                .on_hover_text("Back to the main project")
+                .clicked()
+            {
+                self.view = View::Project(parent_id.clone());
+            }
+        }
+
         let mut delete_it = false;
         ui.horizontal(|ui| {
             let r = ui.add(
                 egui::TextEdit::singleline(&mut self.data.projects[pi].name)
                     .font(TextStyle::Heading)
                     .frame(false)
-                    .hint_text("Project name")
+                    .hint_text(if is_sub { "Subproject name" } else { "Project name" })
                     .desired_width(320.0),
             );
             if r.changed() {
@@ -1914,41 +2364,113 @@ impl App {
             self.typing |= r.has_focus();
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if self.confirm_project.as_deref() == Some(pid) {
-                    if ui.button("Confirm delete").clicked() {
+                    let txt = if n_children > 0 {
+                        "Delete with subprojects"
+                    } else {
+                        "Confirm delete"
+                    };
+                    if ui.button(txt).clicked() {
                         delete_it = true;
                     }
                     if ui.button("Cancel").clicked() {
                         self.confirm_project = None;
                     }
-                } else if ui.button("Delete project").clicked() {
+                } else if ui
+                    .button(if is_sub { "Delete subproject" } else { "Delete project" })
+                    .clicked()
+                {
                     self.confirm_project = Some(pid.to_string());
                 }
             });
         });
         if delete_it {
-            let ids: Vec<String> = self
+            let mut all = vec![pid.to_string()];
+            all.extend(
+                self.data
+                    .projects
+                    .iter()
+                    .filter(|x| x.parent == pid)
+                    .map(|x| x.id.clone()),
+            );
+            let tids: Vec<String> = self
                 .data
                 .tasks
                 .iter()
-                .filter(|t| t.project == pid)
+                .filter(|t| all.contains(&t.project))
                 .map(|t| t.id.clone())
                 .collect();
-            for id in ids {
+            for id in tids {
                 self.purge_done(&id);
             }
-            self.data.tasks.retain(|t| t.project != pid);
-            self.data.projects.retain(|x| x.id != pid);
+            self.data.tasks.retain(|t| !all.contains(&t.project));
+            self.data.projects.retain(|x| !all.contains(&x.id));
             self.confirm_project = None;
-            self.view = View::Calendar;
+            self.view = if is_sub {
+                View::Project(parent_id)
+            } else {
+                View::Calendar
+            };
             self.mark();
             return;
         }
+        ui.horizontal(|ui| {
+            ui.label(cap(&p, "COLOR"));
+            let mut col = self.data.projects[pi].color;
+            if color_row(ui, &mut col, "None") {
+                self.data.projects[pi].color = col;
+                self.mark();
+            }
+        });
 
-        let sel_label = self.sel.format("%b %-d").to_string();
+        let mut open_sub: Option<String> = None;
+        let mut new_sub = false;
         ScrollArea::vertical()
             .id_source("proj")
             .auto_shrink([false, false])
             .show(ui, |ui| {
+                if !is_sub {
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        ui.label(cap(&p, "SUBPROJECTS"));
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            if ui.small_button("+").on_hover_text("New subproject").clicked() {
+                                new_sub = true;
+                            }
+                        });
+                    });
+                    let subs: Vec<(String, String, usize, Option<[u8; 3]>)> = self
+                        .data
+                        .projects
+                        .iter()
+                        .filter(|x| x.parent == pid)
+                        .map(|x| {
+                            (
+                                x.id.clone(),
+                                x.name.clone(),
+                                self.data.tasks.iter().filter(|t| t.project == x.id).count(),
+                                self.proj_color(&x.id),
+                            )
+                        })
+                        .collect();
+                    if subs.is_empty() {
+                        ui.label(cap(&p, "None yet."));
+                    }
+                    for (id, name, n, col) in &subs {
+                        ui.horizontal(|ui| {
+                            let (r, _) = ui.allocate_exact_size(Vec2::new(8.0, 8.0), Sense::hover());
+                            if let Some(a) = col {
+                                ui.painter().circle_filled(r.center(), 4.0, rgb(*a));
+                            }
+                            let shown = if name.trim().is_empty() { "Untitled" } else { name.as_str() };
+                            if ui.selectable_label(false, shown).clicked() {
+                                open_sub = Some(id.clone());
+                            }
+                            ui.label(cap(&p, format!("{} task(s)", n)));
+                        });
+                    }
+                    ui.add_space(8.0);
+                }
+
                 ui.add_space(6.0);
                 ui.label(cap(&p, "TASKS"));
                 let items: Vec<(String, String)> = self
@@ -1968,25 +2490,6 @@ impl App {
                 }
                 for (id, suffix) in &items {
                     self.task_block(ui, id, suffix, true);
-                }
-                ui.add_space(6.0);
-                let resp = ui.add(
-                    egui::TextEdit::singleline(&mut self.proj_title)
-                        .hint_text("Add a task to this project")
-                        .desired_width(f32::INFINITY),
-                );
-                if std::mem::take(&mut self.focus_ptask) {
-                    resp.request_focus();
-                }
-                self.typing |= resp.has_focus();
-                let mut add = resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
-                ui.horizontal(|ui| {
-                    ui.checkbox(&mut self.proj_link, format!("Link to {}", sel_label));
-                    add |= ui.button("Add").clicked();
-                });
-                if add {
-                    self.add_project_task(pid);
-                    resp.request_focus();
                 }
 
                 ui.add_space(14.0);
@@ -2020,7 +2523,7 @@ impl App {
                 } else {
                     let r = ui.add(
                         egui::TextEdit::multiline(&mut self.data.projects[pi].note)
-                            .hint_text("Project notes (markdown supported)")
+                            .hint_text("Notes (markdown supported)")
                             .desired_rows(14)
                             .desired_width(f32::INFINITY),
                     );
@@ -2030,6 +2533,12 @@ impl App {
                     }
                 }
             });
+        if let Some(id) = open_sub {
+            self.view = View::Project(id);
+        }
+        if new_sub {
+            self.new_subproject(pid);
+        }
     }
 
     // ---------- day side panel
@@ -2037,8 +2546,34 @@ impl App {
         let p = self.pal();
         let sel = self.sel;
         let sk = key(sel);
+
+        // add-task bar lives at the bottom: just type and press Enter
+        egui::TopBottomPanel::bottom("day-add")
+            .frame(egui::Frame::none().inner_margin(egui::Margin::symmetric(0.0, 8.0)))
+            .show_separator_line(false)
+            .show_inside(ui, |ui| {
+                let resp = ui.add(
+                    egui::TextEdit::singleline(&mut self.new_title)
+                        .hint_text("Add a task, then press Enter")
+                        .desired_width(f32::INFINITY),
+                );
+                if std::mem::take(&mut self.focus_task) {
+                    resp.request_focus();
+                }
+                self.typing |= resp.has_focus();
+                if resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
+                    self.add_task();
+                    resp.request_focus();
+                }
+            });
+
         ui.label(cap(&p, sel.format("%A").to_string()));
         ui.heading(sel.format("%B %-d, %Y").to_string());
+        if self.data.show_holidays {
+            if let Some((full, _)) = holiday(sel) {
+                ui.label(RichText::new(full).color(p.orange));
+            }
+        }
         let ids: Vec<String> = self.data.tasks_for(sel).iter().map(|t| t.id.clone()).collect();
         let done = ids
             .iter()
@@ -2065,7 +2600,7 @@ impl App {
         }
         ui.add_space(4.0);
 
-        let max_h = (ui.available_height() - 330.0).max(100.0);
+        let max_h = (ui.available_height() - 250.0).max(100.0);
         ScrollArea::vertical()
             .id_source("day-tasks")
             .max_height(max_h)
@@ -2087,33 +2622,6 @@ impl App {
                     self.confirm_delete = None;
                 }
             });
-        }
-
-        // add task
-        ui.add_space(6.0);
-        let resp = ui.add(
-            egui::TextEdit::singleline(&mut self.new_title)
-                .hint_text("Add a task")
-                .desired_width(f32::INFINITY),
-        );
-        if std::mem::take(&mut self.focus_task) {
-            resp.request_focus();
-        }
-        self.typing |= resp.has_focus();
-        let mut add = resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
-        ui.horizontal(|ui| {
-            egui::ComboBox::from_id_source("repeat")
-                .selected_text(self.new_repeat.label())
-                .show_ui(ui, |ui| {
-                    for r in Repeat::ALL {
-                        ui.selectable_value(&mut self.new_repeat, r, r.label());
-                    }
-                });
-            add |= ui.button("Add").clicked();
-        });
-        if add {
-            self.add_task();
-            resp.request_focus();
         }
 
         // note
@@ -2177,6 +2685,418 @@ impl App {
             self.undo_note();
         }
     }
+
+    // ---------- task editor (date, repeat, label, color)
+    fn task_edit_ui(&mut self, ui: &mut egui::Ui, tid: &str) -> bool {
+        let p = self.pal();
+        let Some(ti) = self.data.tasks.iter().position(|t| t.id == tid) else {
+            return false;
+        };
+        let cur = self.data.tasks[ti].sd;
+        let rep = self.data.tasks[ti].repeat;
+        let sel = self.sel;
+        let mut new_date: Option<Option<NaiveDate>> = None;
+        let mut delete = false;
+
+        ui.horizontal(|ui| {
+            ui.label("Title");
+            let r = ui.add(
+                egui::TextEdit::singleline(&mut self.data.tasks[ti].title).desired_width(280.0),
+            );
+            self.typing |= r.has_focus();
+            if r.changed() {
+                self.mark();
+            }
+        });
+        ui.add_space(4.0);
+
+        // date
+        ui.horizontal(|ui| {
+            ui.label("Date");
+            match cur {
+                Some(d) => {
+                    ui.label(
+                        RichText::new(d.format("%a, %b %-d, %Y").to_string()).color(p.accent),
+                    );
+                }
+                None => {
+                    ui.label(cap(&p, "No date"));
+                }
+            }
+            if ui
+                .small_button(format!("Use {}", sel.format("%b %-d")))
+                .on_hover_text("The day currently selected")
+                .clicked()
+            {
+                new_date = Some(Some(sel));
+            }
+            if ui.small_button("Pick…").clicked() {
+                self.edit_picker = !self.edit_picker;
+                let base = cur.unwrap_or(sel);
+                self.edit_cal = (base.year(), base.month());
+            }
+            if cur.is_some() && ui.small_button("Remove").clicked() {
+                new_date = Some(None);
+            }
+        });
+        if self.edit_picker {
+            let (y, m) = self.edit_cal;
+            if let Some(first) = NaiveDate::from_ymd_opt(y, m, 1) {
+                ui.horizontal(|ui| {
+                    if ui.small_button("<").clicked() {
+                        let m0 = m as i32 - 2;
+                        self.edit_cal = (y + m0.div_euclid(12), (m0.rem_euclid(12) + 1) as u32);
+                    }
+                    ui.label(first.format("%B %Y").to_string());
+                    if ui.small_button(">").clicked() {
+                        let m0 = m as i32;
+                        self.edit_cal = (y + m0.div_euclid(12), (m0.rem_euclid(12) + 1) as u32);
+                    }
+                });
+                let start =
+                    first - Duration::days(first.weekday().num_days_from_sunday() as i64);
+                egui::Grid::new("edit-cal").spacing([3.0, 3.0]).show(ui, |ui| {
+                    for n in ["S", "M", "T", "W", "T", "F", "S"] {
+                        ui.label(cap(&p, n));
+                    }
+                    ui.end_row();
+                    for r in 0..6i64 {
+                        for cidx in 0..7i64 {
+                            let d = start + Duration::days(r * 7 + cidx);
+                            let is_cur = cur == Some(d);
+                            let fill = if is_cur {
+                                p.accent
+                            } else if d == sel {
+                                p.hover
+                            } else {
+                                p.card
+                            };
+                            let fg = if is_cur {
+                                p.sel_fg
+                            } else if d.month() == m {
+                                p.fg
+                            } else {
+                                p.muted
+                            };
+                            let b = egui::Button::new(
+                                RichText::new(d.day().to_string()).size(12.5).color(fg),
+                            )
+                            .fill(fill)
+                            .min_size(Vec2::new(30.0, 22.0));
+                            if ui.add(b).clicked() {
+                                new_date = Some(Some(d));
+                            }
+                        }
+                        ui.end_row();
+                    }
+                });
+            }
+        }
+        ui.add_space(4.0);
+
+        // repeat
+        ui.horizontal(|ui| {
+            ui.label("Repeat");
+            ui.add_enabled_ui(cur.is_some(), |ui| {
+                egui::ComboBox::from_id_source("edit-repeat")
+                    .selected_text(rep.label())
+                    .show_ui(ui, |ui| {
+                        for r in Repeat::ALL {
+                            if ui
+                                .selectable_value(&mut self.data.tasks[ti].repeat, r, r.label())
+                                .changed()
+                            {
+                                self.mark();
+                            }
+                        }
+                    });
+            });
+            if cur.is_none() {
+                ui.label(cap(&p, "Add a date to repeat"));
+            }
+        });
+        ui.add_space(4.0);
+
+        // label
+        let label_name = self
+            .data
+            .labels
+            .iter()
+            .find(|l| l.id == self.data.tasks[ti].label)
+            .map(|l| l.name.clone())
+            .unwrap_or_else(|| "None".to_string());
+        ui.horizontal(|ui| {
+            ui.label("Label");
+            egui::ComboBox::from_id_source("edit-label")
+                .selected_text(label_name)
+                .show_ui(ui, |ui| {
+                    if ui
+                        .selectable_label(self.data.tasks[ti].label.is_empty(), "None")
+                        .clicked()
+                    {
+                        self.data.tasks[ti].label.clear();
+                        self.mark();
+                    }
+                    let labels: Vec<(String, String)> = self
+                        .data
+                        .labels
+                        .iter()
+                        .map(|l| (l.id.clone(), l.name.clone()))
+                        .collect();
+                    for (id, name) in &labels {
+                        if ui
+                            .selectable_label(self.data.tasks[ti].label == *id, name.as_str())
+                            .clicked()
+                        {
+                            self.data.tasks[ti].label = id.clone();
+                            self.mark();
+                        }
+                    }
+                });
+            if ui.small_button("Manage…").clicked() {
+                self.labels_open = true;
+            }
+        });
+        ui.add_space(4.0);
+
+        // color
+        ui.label(cap(&p, "Custom color (overrides label)"));
+        let mut col = self.data.tasks[ti].color;
+        if color_row(ui, &mut col, "None") {
+            self.data.tasks[ti].color = col;
+            self.mark();
+        }
+
+        ui.add_space(10.0);
+        ui.horizontal(|ui| {
+            if self.confirm_delete.as_deref() == Some(tid) {
+                ui.label(RichText::new("Delete from every day?").color(p.orange));
+                if ui.button("Delete").clicked() {
+                    delete = true;
+                }
+                if ui.button("Cancel").clicked() {
+                    self.confirm_delete = None;
+                }
+            } else if ui.button("Delete task").clicked() {
+                if rep != Repeat::Once {
+                    self.confirm_delete = Some(tid.to_string());
+                } else {
+                    delete = true;
+                }
+            }
+        });
+
+        if let Some(nd) = new_date {
+            self.set_task_date(tid, nd);
+            self.edit_picker = false;
+        }
+        if delete {
+            self.delete_task(tid);
+            self.confirm_delete = None;
+            return false;
+        }
+        true
+    }
+
+    // ---------- label manager
+    fn labels_ui(&mut self, ui: &mut egui::Ui) {
+        let p = self.pal();
+        ui.label(cap(
+            &p,
+            "Named colors you can give to tasks, like Homework or Work.",
+        ));
+        ui.add_space(4.0);
+        let mut del: Option<String> = None;
+        for i in 0..self.data.labels.len() {
+            ui.horizontal(|ui| {
+                if ui
+                    .color_edit_button_srgb(&mut self.data.labels[i].color)
+                    .changed()
+                {
+                    self.mark();
+                }
+                let r = ui.add(
+                    egui::TextEdit::singleline(&mut self.data.labels[i].name).desired_width(170.0),
+                );
+                self.typing |= r.has_focus();
+                if r.changed() {
+                    self.mark();
+                }
+                if ui.small_button("×").on_hover_text("Delete label").clicked() {
+                    del = Some(self.data.labels[i].id.clone());
+                }
+            });
+        }
+        if let Some(id) = del {
+            self.data.labels.retain(|l| l.id != id);
+            for t in &mut self.data.tasks {
+                if t.label == id {
+                    t.label.clear();
+                }
+            }
+            self.mark();
+        }
+        ui.add_space(6.0);
+        ui.separator();
+        ui.horizontal(|ui| {
+            ui.color_edit_button_srgb(&mut self.new_label_color);
+            let r = ui.add(
+                egui::TextEdit::singleline(&mut self.new_label)
+                    .hint_text("New label name")
+                    .desired_width(170.0),
+            );
+            self.typing |= r.has_focus();
+            let enter = r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
+            if ui.button("Add label").clicked() || enter {
+                let name = self.new_label.trim().to_string();
+                if !name.is_empty() {
+                    self.data.labels.push(Label {
+                        id: new_id(),
+                        name,
+                        color: self.new_label_color,
+                    });
+                    self.new_label.clear();
+                    self.mark();
+                }
+            }
+        });
+    }
+
+    // ---------- theme settings (appearance + calendar backgrounds)
+    fn settings_ui(&mut self, ui: &mut egui::Ui) {
+        let p = self.pal();
+        let max_h = (ui.ctx().screen_rect().height() - 140.0).max(300.0);
+        ScrollArea::vertical()
+            .id_source("settings")
+            .max_height(max_h)
+            .show(ui, |ui| {
+                ui.label(cap(&p, "APPEARANCE"));
+                let mut want_dark = self.dark;
+                ui.horizontal(|ui| {
+                    ui.label("Mode");
+                    if ui.selectable_label(self.dark, "Dark").clicked() {
+                        want_dark = true;
+                    }
+                    if ui.selectable_label(!self.dark, "Light").clicked() {
+                        want_dark = false;
+                    }
+                });
+                if want_dark != self.dark {
+                    self.dark = want_dark;
+                    self.data.theme = if self.dark { "dark" } else { "light" }.to_string();
+                    apply_theme(ui.ctx(), &self.pal(), self.dark, self.data.ui_font / 100.0);
+                    self.mark();
+                }
+                ui.add_space(4.0);
+                ui.label("Primary color");
+                let mut a = self.data.accent;
+                if color_row(ui, &mut a, "Default") {
+                    self.data.accent = a;
+                    apply_theme(ui.ctx(), &self.pal(), self.dark, self.data.ui_font / 100.0);
+                    self.mark();
+                }
+
+                if ui
+                    .add(
+                        egui::Slider::new(&mut self.data.ui_font, 80.0..=150.0)
+                            .suffix("%")
+                            .integer()
+                            .text("Interface text size"),
+                    )
+                    .changed()
+                {
+                    apply_theme(ui.ctx(), &self.pal(), self.dark, self.data.ui_font / 100.0);
+                    self.mark();
+                }
+
+                ui.add_space(8.0);
+                ui.label(cap(&p, "CALENDAR"));
+                if ui
+                    .add(
+                        egui::Slider::new(&mut self.data.cell_opacity, 40.0..=100.0)
+                            .suffix("%")
+                            .integer()
+                            .text("Cell opacity"),
+                    )
+                    .changed()
+                {
+                    self.mark();
+                }
+                if ui
+                    .add(
+                        egui::Slider::new(&mut self.data.cell_radius, 0.0..=16.0)
+                            .integer()
+                            .text("Cell corners"),
+                    )
+                    .changed()
+                {
+                    self.mark();
+                }
+                if ui
+                    .add(egui::Slider::new(&mut self.data.preview_max, 0..=6).text("Task previews per day"))
+                    .changed()
+                {
+                    self.mark();
+                }
+                if ui
+                    .add(
+                        egui::Slider::new(&mut self.data.cal_font, 80.0..=200.0)
+                            .suffix("%")
+                            .integer()
+                            .text("Calendar text size"),
+                    )
+                    .changed()
+                {
+                    self.mark();
+                }
+                ui.horizontal(|ui| {
+                    ui.label("Calendar text weight");
+                    for (v, name) in [(0u8, "Normal"), (1, "Bold"), (2, "Extra bold")] {
+                        if ui.selectable_label(self.data.text_bold == v, name).clicked() {
+                            self.data.text_bold = v;
+                            self.mark();
+                        }
+                    }
+                });
+                if ui
+                    .add(
+                        egui::Slider::new(&mut self.data.text_backing, 0.0..=100.0)
+                            .suffix("%")
+                            .integer()
+                            .text("Text backing"),
+                    )
+                    .on_hover_text("A soft panel behind task text so it stays readable over images")
+                    .changed()
+                {
+                    self.mark();
+                }
+                if ui
+                    .checkbox(&mut self.data.text_outline, "Text outline")
+                    .on_hover_text("A thin halo around calendar text")
+                    .changed()
+                {
+                    self.mark();
+                }
+                if ui
+                    .checkbox(&mut self.data.week_mon, "Week starts on Monday")
+                    .changed()
+                {
+                    self.mark();
+                }
+                if ui
+                    .checkbox(&mut self.data.show_holidays, "Show holidays")
+                    .changed()
+                {
+                    self.mark();
+                }
+
+                ui.add_space(8.0);
+                ui.separator();
+                egui::CollapsingHeader::new("Calendar backgrounds")
+                    .default_open(false)
+                    .show(ui, |ui| self.bg_ui(ui));
+            });
+    }
 }
 
 impl eframe::App for App {
@@ -2228,17 +3148,48 @@ impl eframe::App for App {
                 View::Project(id) => self.project_view(ui, &id),
             });
 
-        if self.bg_open {
+        if let Some(tid) = self.edit_task.clone() {
             let mut open = true;
-            egui::Window::new("Backgrounds")
+            let mut keep = true;
+            egui::Window::new("Edit task")
+                .open(&mut open)
+                .collapsible(false)
+                .resizable(false)
+                .default_width(380.0)
+                .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    keep = self.task_edit_ui(ui, &tid);
+                });
+            if !open || !keep {
+                self.edit_task = None;
+                self.edit_picker = false;
+            }
+        }
+
+        if self.labels_open {
+            let mut open = true;
+            egui::Window::new("Labels")
+                .open(&mut open)
+                .collapsible(false)
+                .resizable(false)
+                .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| self.labels_ui(ui));
+            if !open {
+                self.labels_open = false;
+            }
+        }
+
+        if self.settings_open {
+            let mut open = true;
+            egui::Window::new("Theme settings")
                 .open(&mut open)
                 .collapsible(false)
                 .resizable(false)
                 .default_width(440.0)
                 .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
-                .show(ctx, |ui| self.bg_ui(ui));
+                .show(ctx, |ui| self.settings_ui(ui));
             if !open {
-                self.bg_open = false;
+                self.settings_open = false;
             }
         }
 
